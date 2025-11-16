@@ -1,0 +1,8 @@
+[build]
+builder = "nixpacks"
+
+[build.nixpacksPlan]
+installCommand = "npm install"
+
+[start]
+cmd = "node web-WhatsApp.js"

@@ -1,0 +1,22 @@
+{
+  "name": "whatsapp-backend",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "packageManager": "pnpm@10.17.1",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.2",
+    "express": "^5.1.0",
+    "firebase-admin": "^13.5.0",
+    "puppeteer": "^24.24.0",
+    "qrcode-terminal": "^0.12.0",
+    "whatsapp-web.js": "^1.34.1"
+  }
+}
