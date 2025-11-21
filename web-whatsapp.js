@@ -6,10 +6,12 @@ const express = require("express");
 const cors = require("cors");
 const { Client, LocalAuth } = require("whatsapp-web.js");
 const admin = require("firebase-admin");
+const crypto = require("crypto"); // Added crypto module
 
 const PORT = process.env.PORT || 4000;
 const RAW_MESSAGES_COLLECTION = "raw_messages";
 const clients = {}; // { userId: clientInstance }
+const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
 
 // -------------------------
 // 🔥 FIREBASE INITIALIZATION
@@ -19,6 +21,9 @@ let rawMessagesCollection;
 
 async function initializeFirebase() {
   try {
+    if (!ENCRYPTION_KEY || ENCRYPTION_KEY.length !== 32) {
+      throw new Error("Missing or invalid ENCRYPTION_KEY. Must be 32 characters long.");
+    }
     const base64Key = process.env.FIREBASE_SERVICE_ACCOUNT_BASE64;
     if (!base64Key) throw new Error("Missing FIREBASE_SERVICE_ACCOUNT_BASE64");
 
@@ -40,6 +45,27 @@ async function initializeFirebase() {
 }
 
 // -------------------------
+// 🔒 ENCRYPTION HELPER
+// -------------------------
+function encrypt(text) {
+  if (!text) return { encryptedBody: null, iv: null, authTag: null };
+
+  const iv = crypto.randomBytes(16); // Initialization Vector (16 bytes for AES-256-GCM)
+  const cipher = crypto.createCipheriv('aes-256-gcm', Buffer.from(ENCRYPTION_KEY, 'utf-8'), iv);
+
+  let encrypted = cipher.update(text, 'utf-8', 'hex');
+  encrypted += cipher.final('hex');
+  const authTag = cipher.getAuthTag().toString('hex');
+
+  return {
+    encryptedBody: encrypted,
+    iv: iv.toString('hex'),
+    authTag: authTag,
+  };
+}
+
+
+// -------------------------
 // 🔥 UPDATE WHATSAPP SESSION STATUS
 // -------------------------
 async function updateFirestoreStatus(userId, data) {
@@ -54,35 +80,42 @@ async function updateFirestoreStatus(userId, data) {
 }
 
 // -------------------------
-// 🔥 SAVE RAW MESSAGE
+// 🔥 SAVE RAW MESSAGE (ENCRYPTED)
 // -------------------------
 async function saveRawMessage(msg, userId) {
   try {
+    const encryptedData = encrypt(msg.body);
+
     const data = {
       timestamp: admin.firestore.Timestamp.now(),
       userId,
       from: msg.from,
       to: msg.to,
-      body: msg.body || null,
+      // Store encrypted content, IV, and authTag
+      encryptedBody: encryptedData.encryptedBody,
+      iv: encryptedData.iv,
+      authTag: encryptedData.authTag,
       type: msg.type,
       phoneNumber: msg.from.split("@")[0],
       wwebId: msg.id._serialized,
-      isGroup: false, // ALWAYS false because group filtering done above
+      isGroup: false,
       processed: false,
       isLead: null,
       replyPending: false,
       autoReplyText: null,
+      // Removed plaintext 'body'
     };
 
     const docRef = await rawMessagesCollection.add(data);
-    console.log(`📩 [${userId}] Saved message → ${docRef.id.substring(0, 8)}...`);
+    // Log metadata only
+    console.log(`📩 [${userId}] Saved encrypted message → ${docRef.id.substring(0, 8)}...`);
   } catch (err) {
     console.error(`❌ Error saving message for ${userId}:`, err);
   }
 }
 
 // -------------------------
-// 🤖 AI REPLY EXECUTOR WATCHER
+// 🤖 AI REPLY EXECUTOR WATCHER (No changes needed here)
 // -------------------------
 function startAiReplyExecutor() {
   if (!db) return;
@@ -98,6 +131,7 @@ function startAiReplyExecutor() {
       const doc = change.doc;
       const d = doc.data();
 
+      // Uses autoReplyText which is NOT encrypted, so functionality is preserved.
       if (!d.autoReplyText || !d.from || !d.userId) return;
 
       const client = clients[d.userId];
@@ -167,7 +201,7 @@ async function handleInboundMessage(msg, userId) {
 }
 
 // -------------------------
-// 🔥 CLIENT EVENT LISTENERS
+// 🔥 CLIENT EVENT LISTENERS (No changes needed here)
 // -------------------------
 function setupClientListeners(client, userId) {
   client.on("qr", (qr) => {
@@ -213,7 +247,7 @@ function setupClientListeners(client, userId) {
 }
 
 // -------------------------
-// 🔥 CREATE WHATSAPP CLIENT
+// 🔥 CREATE WHATSAPP CLIENT (No changes needed here)
 // -------------------------
 async function createClient(userId) {
   if (clients[userId]) return clients[userId];
@@ -263,7 +297,7 @@ async function createClient(userId) {
 }
 
 // -------------------------
-// 🌍 EXPRESS SERVER
+// 🌍 EXPRESS SERVER (No changes needed here)
 // -------------------------
 const app = express();
 app.use(cors({ origin: "*", credentials: true }));
