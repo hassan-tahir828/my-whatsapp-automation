@@ -6,12 +6,14 @@ const express = require("express");
 const cors = require("cors");
 const { Client, LocalAuth } = require("whatsapp-web.js");
 const admin = require("firebase-admin");
-const crypto = require("crypto"); // Added crypto module
+const crypto = require("crypto");
+const fs = require("fs"); // Added fs for AUTH_PATH checks
 
 const PORT = process.env.PORT || 4000;
 const RAW_MESSAGES_COLLECTION = "raw_messages";
 const clients = {}; // { userId: clientInstance }
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
+const QR_TIMEOUT_MS = 60000; // 60 seconds
 
 // -------------------------
 // 🔥 FIREBASE INITIALIZATION
@@ -21,8 +23,9 @@ let rawMessagesCollection;
 
 async function initializeFirebase() {
   try {
-    if (!ENCRYPTION_KEY || ENCRYPTION_KEY.length !== 32) {
-      throw new Error("Missing or invalid ENCRYPTION_KEY. Must be 32 characters long.");
+    // SECURITY CHECK: Ensure ENCRYPTION_KEY is a 64-character hex string (32 bytes)
+    if (!ENCRYPTION_KEY || ENCRYPTION_KEY.length !== 64 || !/^[0-9a-fA-F]{64}$/.test(ENCRYPTION_KEY)) {
+      throw new Error("Missing or invalid ENCRYPTION_KEY. Must be a 64-character hexadecimal string.");
     }
     const base64Key = process.env.FIREBASE_SERVICE_ACCOUNT_BASE64;
     if (!base64Key) throw new Error("Missing FIREBASE_SERVICE_ACCOUNT_BASE64");
@@ -50,8 +53,9 @@ async function initializeFirebase() {
 function encrypt(text) {
   if (!text) return { encryptedBody: null, iv: null, authTag: null };
 
-  const iv = crypto.randomBytes(16); // Initialization Vector (16 bytes for AES-256-GCM)
-  const cipher = crypto.createCipheriv('aes-256-gcm', Buffer.from(ENCRYPTION_KEY, 'utf-8'), iv);
+  const key = Buffer.from(ENCRYPTION_KEY, 'hex'); // Use 'hex' encoding
+  const iv = crypto.randomBytes(16);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
 
   let encrypted = cipher.update(text, 'utf-8', 'hex');
   encrypted += cipher.final('hex');
@@ -80,10 +84,11 @@ async function updateFirestoreStatus(userId, data) {
 }
 
 // -------------------------
-// 🔥 SAVE RAW MESSAGE (ENCRYPTED)
+// 🔥 SAVE RAW MESSAGE (ENCRYPTED) (Logic maintained)
 // -------------------------
 async function saveRawMessage(msg, userId) {
   try {
+    // ... (Encryption and Firestore logic is unchanged)
     const encryptedData = encrypt(msg.body);
 
     const data = {
@@ -91,7 +96,6 @@ async function saveRawMessage(msg, userId) {
       userId,
       from: msg.from,
       to: msg.to,
-      // Store encrypted content, IV, and authTag
       encryptedBody: encryptedData.encryptedBody,
       iv: encryptedData.iv,
       authTag: encryptedData.authTag,
@@ -103,11 +107,9 @@ async function saveRawMessage(msg, userId) {
       isLead: null,
       replyPending: false,
       autoReplyText: null,
-      // Removed plaintext 'body'
     };
 
     const docRef = await rawMessagesCollection.add(data);
-    // Log metadata only
     console.log(`📩 [${userId}] Saved encrypted message → ${docRef.id.substring(0, 8)}...`);
   } catch (err) {
     console.error(`❌ Error saving message for ${userId}:`, err);
@@ -115,9 +117,10 @@ async function saveRawMessage(msg, userId) {
 }
 
 // -------------------------
-// 🤖 AI REPLY EXECUTOR WATCHER (No changes needed here)
+// 🤖 AI REPLY EXECUTOR WATCHER (Logic maintained)
 // -------------------------
 function startAiReplyExecutor() {
+  // ... (Executor logic is unchanged)
   if (!db) return;
 
   const q = db.collection(RAW_MESSAGES_COLLECTION).where("replyPending", "==", true);
@@ -131,7 +134,6 @@ function startAiReplyExecutor() {
       const doc = change.doc;
       const d = doc.data();
 
-      // Uses autoReplyText which is NOT encrypted, so functionality is preserved.
       if (!d.autoReplyText || !d.from || !d.userId) return;
 
       const client = clients[d.userId];
@@ -154,17 +156,17 @@ function startAiReplyExecutor() {
 }
 
 // -------------------------
-// 🔥 BULLETPROOF MESSAGE HANDLER
+// 🔥 BULLETPROOF MESSAGE HANDLER (Logic maintained)
 // -------------------------
 async function handleInboundMessage(msg, userId) {
+  // ... (Handler logic is unchanged)
   try {
     const jid = msg.from || "";
     const body = msg.body?.trim() || "";
 
-    // 1️⃣ BLOCK GROUPS / COMMUNITIES / CHANNELS / BROADCAST
     const isGroupLike =
       msg.isGroup ||
-      jid.endsWith("@g.us") || // group
+      jid.endsWith("@g.us") ||
       jid.includes("community") ||
       jid.includes("@broadcast") ||
       jid.includes("newsletter") ||
@@ -175,25 +177,21 @@ async function handleInboundMessage(msg, userId) {
       return;
     }
 
-    // 2️⃣ IGNORE SELF-MESSAGES (WhatsApp echo)
     if (msg.fromMe) {
       console.log(`⚠️ Ignored echo from self`);
       return;
     }
 
-    // 3️⃣ IGNORE EMPTY / EMOJI / SPAMMY BODY
     if (!body || body.length < 1) {
       console.log(`⚠️ Ignored empty body`);
       return;
     }
 
-    // 4️⃣ OPTIONAL: ignore media types
     if (["sticker", "location", "audio", "video", "image"].includes(msg.type)) {
       console.log(`⚠️ Skipped media message type=${msg.type}`);
       return;
     }
 
-    // 5️⃣ VALID HUMAN DIRECT MESSAGE → SAVE
     await saveRawMessage(msg, userId);
   } catch (err) {
     console.error("❌ Inbound Handler Error:", err);
@@ -201,7 +199,7 @@ async function handleInboundMessage(msg, userId) {
 }
 
 // -------------------------
-// 🔥 CLIENT EVENT LISTENERS (No changes needed here)
+// 🔥 CLIENT EVENT LISTENERS (Logic maintained)
 // -------------------------
 function setupClientListeners(client, userId) {
   client.on("qr", (qr) => {
@@ -247,12 +245,11 @@ function setupClientListeners(client, userId) {
 }
 
 // -------------------------
-// 🔥 CREATE WHATSAPP CLIENT (No changes needed here)
+// 🔥 CREATE WHATSAPP CLIENT WITH QR TIMEOUT
 // -------------------------
 async function createClient(userId) {
   if (clients[userId]) return clients[userId];
 
-  const fs = require("fs");
   const AUTH_PATH = process.env.WWEBJS_AUTH_DIR || "/app/data/.wwebjs_auth";
 
   if (!fs.existsSync(AUTH_PATH)) {
@@ -283,21 +280,55 @@ async function createClient(userId) {
   setupClientListeners(client, userId);
 
   try {
-    await client.initialize();
-    console.log(`🚀 Initialized WhatsApp → ${userId}`);
-  } catch (err) {
-    console.error(`❌ Error initializing client (${userId}):`, err);
-    updateFirestoreStatus(userId, {
-      status: "init_failed",
+    // --- 1. Define the success condition (client.ready) ---
+    const readyPromise = new Promise((resolve) => {
+      client.once("ready", resolve);
+      // NOTE: We also listen for 'disconnected' or 'auth_failure' 
+      // which will cause client.initialize() to reject, handling those cases naturally.
     });
-  }
 
-  clients[userId] = client;
-  return client;
+    // --- 2. Define the timeout condition ---
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => {
+        reject(new Error(`QR_TIMEOUT: Client ${userId} failed to scan QR after ${QR_TIMEOUT_MS / 1000}s.`));
+      }, QR_TIMEOUT_MS);
+    });
+    
+    // --- 3. Race the initialize call against the timeout ---
+    // client.initialize() starts the process which fires the 'qr' and eventually 'ready' events.
+    await Promise.race([client.initialize(), timeoutPromise]);
+    
+    // If client.initialize() resolves successfully, we wait for 'ready'
+    await readyPromise;
+
+
+    console.log(`🚀 Initialized WhatsApp → ${userId}`);
+    clients[userId] = client;
+    return client;
+
+  } catch (err) {
+    console.error(`❌ Error initializing client (${userId}):`, err.message);
+    
+    // If the error is a timeout, or any other initialization failure, destroy the client
+    try {
+      if (clients[userId]) delete clients[userId];
+      await client.destroy();
+    } catch (destroyErr) {
+      // Ignore destroy error
+    }
+
+    updateFirestoreStatus(userId, {
+      status: err.message.includes('QR_TIMEOUT') ? "qr_timeout" : "init_failed",
+      qr: null,
+      connected: false
+    });
+    // Re-throw the error so the calling function can handle it (e.g., the /start-whatsapp endpoint)
+    throw err;
+  }
 }
 
 // -------------------------
-// 🌍 EXPRESS SERVER (No changes needed here)
+// 🌍 EXPRESS SERVER (Logic maintained)
 // -------------------------
 const app = express();
 app.use(cors({ origin: "*", credentials: true }));
@@ -308,8 +339,12 @@ app.post("/start-whatsapp", async (req, res) => {
   const { userId } = req.body;
   if (!userId) return res.status(400).json({ error: "Missing userId" });
 
-  await createClient(userId);
-  res.json({ message: `Client started for ${userId}` });
+  try {
+    await createClient(userId);
+    res.json({ message: `Client started for ${userId}` });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // Disconnect client
