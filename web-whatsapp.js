@@ -1,5 +1,5 @@
 // web-whatsapp.js
-// ZareaAI — Multi-user WhatsApp backend (Flood-Proof v6)
+// ZareaAI — Multi-user WhatsApp backend (Flood-Proof v7: QR Timeout Fix)
 
 require("dotenv").config();
 const express = require("express");
@@ -7,7 +7,7 @@ const cors = require("cors");
 const { Client, LocalAuth } = require("whatsapp-web.js");
 const admin = require("firebase-admin");
 const crypto = require("crypto");
-const fs = require("fs"); // Added fs for AUTH_PATH checks
+const fs = require("fs"); 
 
 const PORT = process.env.PORT || 4000;
 const RAW_MESSAGES_COLLECTION = "raw_messages";
@@ -84,11 +84,10 @@ async function updateFirestoreStatus(userId, data) {
 }
 
 // -------------------------
-// 🔥 SAVE RAW MESSAGE (ENCRYPTED) (Logic maintained)
+// 🔥 SAVE RAW MESSAGE (ENCRYPTED)
 // -------------------------
 async function saveRawMessage(msg, userId) {
   try {
-    // ... (Encryption and Firestore logic is unchanged)
     const encryptedData = encrypt(msg.body);
 
     const data = {
@@ -117,10 +116,9 @@ async function saveRawMessage(msg, userId) {
 }
 
 // -------------------------
-// 🤖 AI REPLY EXECUTOR WATCHER (Logic maintained)
+// 🤖 AI REPLY EXECUTOR WATCHER
 // -------------------------
 function startAiReplyExecutor() {
-  // ... (Executor logic is unchanged)
   if (!db) return;
 
   const q = db.collection(RAW_MESSAGES_COLLECTION).where("replyPending", "==", true);
@@ -140,6 +138,8 @@ function startAiReplyExecutor() {
       if (!client) return;
 
       try {
+        // Update to handle the 'ready' event for a new client start, if needed, 
+        // but for ongoing clients, this is fine.
         await client.sendMessage(d.from, d.autoReplyText);
 
         await doc.ref.update({
@@ -156,10 +156,9 @@ function startAiReplyExecutor() {
 }
 
 // -------------------------
-// 🔥 BULLETPROOF MESSAGE HANDLER (Logic maintained)
+// 🔥 BULLETPROOF MESSAGE HANDLER
 // -------------------------
 async function handleInboundMessage(msg, userId) {
-  // ... (Handler logic is unchanged)
   try {
     const jid = msg.from || "";
     const body = msg.body?.trim() || "";
@@ -199,7 +198,7 @@ async function handleInboundMessage(msg, userId) {
 }
 
 // -------------------------
-// 🔥 CLIENT EVENT LISTENERS (Logic maintained)
+// 🔥 CLIENT EVENT LISTENERS
 // -------------------------
 function setupClientListeners(client, userId) {
   client.on("qr", (qr) => {
@@ -245,18 +244,22 @@ function setupClientListeners(client, userId) {
 }
 
 // -------------------------
-// 🔥 CREATE WHATSAPP CLIENT WITH QR TIMEOUT
+// 🔥 CREATE WHATSAPP CLIENT WITH QR TIMEOUT (FIXED)
 // -------------------------
 async function createClient(userId) {
   if (clients[userId]) return clients[userId];
 
   const AUTH_PATH = process.env.WWEBJS_AUTH_DIR || "/app/data/.wwebjs_auth";
 
+  // Ensure the directory exists and has correct permissions
   if (!fs.existsSync(AUTH_PATH)) {
     fs.mkdirSync(AUTH_PATH, { recursive: true });
   }
-
-  fs.chmodSync(AUTH_PATH, 0o777);
+  try {
+      fs.chmodSync(AUTH_PATH, 0o777);
+  } catch(e) {
+      console.log(`⚠️ Could not set permissions on ${AUTH_PATH}. May cause issues.`);
+  }
 
   const client = new Client({
     authStrategy: new LocalAuth({
@@ -280,27 +283,18 @@ async function createClient(userId) {
   setupClientListeners(client, userId);
 
   try {
-    // --- 1. Define the success condition (client.ready) ---
-    const readyPromise = new Promise((resolve) => {
-      client.once("ready", resolve);
-      // NOTE: We also listen for 'disconnected' or 'auth_failure' 
-      // which will cause client.initialize() to reject, handling those cases naturally.
-    });
-
-    // --- 2. Define the timeout condition ---
+    // 1. Define the timeout promise
     const timeoutPromise = new Promise((_, reject) => {
       setTimeout(() => {
         reject(new Error(`QR_TIMEOUT: Client ${userId} failed to scan QR after ${QR_TIMEOUT_MS / 1000}s.`));
       }, QR_TIMEOUT_MS);
     });
     
-    // --- 3. Race the initialize call against the timeout ---
-    // client.initialize() starts the process which fires the 'qr' and eventually 'ready' events.
-    await Promise.race([client.initialize(), timeoutPromise]);
-    
-    // If client.initialize() resolves successfully, we wait for 'ready'
-    await readyPromise;
-
+    // 2. Race the initialize call against the timeout
+    await Promise.race([
+        client.initialize(), 
+        timeoutPromise
+    ]);
 
     console.log(`🚀 Initialized WhatsApp → ${userId}`);
     clients[userId] = client;
@@ -309,26 +303,28 @@ async function createClient(userId) {
   } catch (err) {
     console.error(`❌ Error initializing client (${userId}):`, err.message);
     
-    // If the error is a timeout, or any other initialization failure, destroy the client
+    // Cleanup: Destroy the client and remove from map
     try {
       if (clients[userId]) delete clients[userId];
       await client.destroy();
     } catch (destroyErr) {
-      // Ignore destroy error
+      console.log(`⚠️ Ignore error during client.destroy(): ${destroyErr.message}`);
     }
 
+    // Update session status based on error type
     updateFirestoreStatus(userId, {
       status: err.message.includes('QR_TIMEOUT') ? "qr_timeout" : "init_failed",
       qr: null,
       connected: false
     });
-    // Re-throw the error so the calling function can handle it (e.g., the /start-whatsapp endpoint)
+    
+    // Re-throw the error so the calling Express endpoint doesn't hang
     throw err;
   }
 }
 
 // -------------------------
-// 🌍 EXPRESS SERVER (Logic maintained)
+// 🌍 EXPRESS SERVER
 // -------------------------
 const app = express();
 app.use(cors({ origin: "*", credentials: true }));
@@ -343,6 +339,7 @@ app.post("/start-whatsapp", async (req, res) => {
     await createClient(userId);
     res.json({ message: `Client started for ${userId}` });
   } catch (e) {
+    // Catch the error thrown by createClient (including QR_TIMEOUT)
     res.status(500).json({ error: e.message });
   }
 });
@@ -350,9 +347,16 @@ app.post("/start-whatsapp", async (req, res) => {
 // Disconnect client
 app.post("/disconnect", async (req, res) => {
   const { userId } = req.body;
-  if (!clients[userId]) return res.status(400).json({ error: "Not running" });
+  const client = clients[userId];
+  if (!client) return res.status(400).json({ error: "Not running" });
 
-  await clients[userId].logout();
+  try {
+      await client.logout();
+      await client.destroy(); // Ensure the browser process is killed
+  } catch (e) {
+      console.error(`⚠️ Error during client logout/destroy: ${e.message}`);
+  }
+  
   delete clients[userId];
 
   res.json({ message: `Client ${userId} disconnected.` });
