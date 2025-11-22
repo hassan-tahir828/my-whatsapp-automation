@@ -102,6 +102,7 @@ async function saveRawMessage(msg, userId) {
       phoneNumber: msg.from.split("@")[0],
       wwebId: msg.id._serialized,
       isGroup: false,
+      processing: false,
       processed: false,
       isLead: null,
       replyPending: false,
