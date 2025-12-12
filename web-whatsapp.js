@@ -84,11 +84,49 @@ async function createWhatsAppClient(userId, sessionName) {
     client.on("ready", async () => {
         console.log(`WhatsApp READY for userId = ${userId}`);
 
+        const info = client.info; // Get client info for phone number
+
         await db.collection("whatsapp_sessions").doc(userId).set({
             status: "ready",
             qr: "",
+            phoneNumber: info.wid.user, // Store phone number
             updatedAt: admin.firestore.Timestamp.now()
         }, { merge: true });
+    });
+
+    // ---------- AUTH FAILURE / DISCONNECTED EVENT ----------
+    client.on('auth_failure', async msg => {
+        console.error('AUTHENTICATION FAILURE', msg);
+        // Set status to error or disconnected
+        await db.collection("whatsapp_sessions").doc(userId).set({
+            status: "error",
+            updatedAt: admin.firestore.Timestamp.now()
+        }, { merge: true });
+        
+        // Remove client from store
+        if (clients[userId]) {
+            await clients[userId].destroy().catch(e => console.error("Error destroying client on auth_failure:", e.message));
+            delete clients[userId];
+            console.log(`Client ${userId} destroyed and removed due to auth_failure.`);
+        }
+    });
+
+    client.on('disconnected', async (reason) => {
+        console.log('Client disconnected:', reason);
+        // Set status to disconnected
+        await db.collection("whatsapp_sessions").doc(userId).set({
+            status: "disconnected",
+            qr: "",
+            phoneNumber: null,
+            updatedAt: admin.firestore.Timestamp.now()
+        }, { merge: true });
+        
+        // Remove client from store
+        if (clients[userId]) {
+            await clients[userId].destroy().catch(e => console.error("Error destroying client on disconnected:", e.message));
+            delete clients[userId];
+            console.log(`Client ${userId} destroyed and removed due to disconnected event.`);
+        }
     });
 
     // ---------- MESSAGE EVENT ----------
@@ -182,6 +220,44 @@ app.get("/qr/:userId", async (req, res) => {
         status: data.status || "unknown"
     });
 });
+
+// NEW: Disconnect and destroy the WhatsApp session
+app.post("/disconnect-session", async (req, res) => {
+    const { userId } = req.body;
+
+    if (!userId) return res.status(400).json({ error: "Missing userId" });
+    
+    const client = clients[userId];
+
+    if (client) {
+        try {
+            // Destroy the client instance
+            await client.destroy();
+            console.log(`Client ${userId} destroyed successfully.`);
+            
+            // Remove from global store
+            delete clients[userId];
+
+            // Clear Firestore session data
+            await db.collection("whatsapp_sessions").doc(userId).delete();
+            console.log(`Firestore session ${userId} deleted.`);
+            
+            return res.json({ success: true, message: "Session disconnected and removed." });
+        } catch (err) {
+            console.error(`Error disconnecting client ${userId}:`, err.message);
+            // Even if destroy fails, try to clear the client and Firestore state
+            delete clients[userId];
+             await db.collection("whatsapp_sessions").doc(userId).delete().catch(e => console.error("Error deleting Firestore doc during disconnect error:", e.message));
+
+            return res.status(500).json({ error: "Failed to cleanly disconnect session." });
+        }
+    } else {
+        // If client is not in store, ensure Firestore is clean
+        await db.collection("whatsapp_sessions").doc(userId).delete().catch(e => console.error("Error deleting Firestore doc when client not found:", e.message));
+        return res.json({ success: true, message: "Session not active on server, state cleaned." });
+    }
+});
+
 
 // Manual send (for debugging)
 app.post("/send", async (req, res) => {
