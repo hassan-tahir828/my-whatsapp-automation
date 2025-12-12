@@ -8,7 +8,7 @@ const crypto = require("crypto");
 
 // ---------------- FIREBASE INIT ----------------
 const serviceAccountBase64 = process.env.FIREBASE_SERVICE_ACCOUNT_BASE64;
-if (!serviceAccountBase64) throw new Error("Missing FIREBASE_SERVICE_ACCOUNT_WPP_BASE64");
+if (!serviceAccountBase64) throw new Error("Missing FIREBASE_SERVICE_ACCOUNT_BASE64");
 
 const serviceJson = JSON.parse(Buffer.from(serviceAccountBase64, "base64").toString("utf8"));
 
